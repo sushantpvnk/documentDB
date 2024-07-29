@@ -1,0 +1,90 @@
+name: Deploy DocumentDB with VPC
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v2
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-east-1
+
+      - name: Create VPC
+        id: vpc
+        run: |
+          VPC_ID=$(aws ec2 create-vpc --cidr-block 10.0.0.0/16 --query 'Vpc.VpcId' --output text)
+          aws ec2 create-tags --resources $VPC_ID --tags Key=Name,Value=my-vpc
+          echo "VPC_ID=${VPC_ID}" >> $GITHUB_ENV
+        env:
+          AWS_DEFAULT_REGION: us-east-1
+
+      - name: Create Subnets
+        id: subnets
+        run: |
+          SUBNET_ID_1=$(aws ec2 create-subnet --vpc-id ${{ env.VPC_ID }} --cidr-block 10.0.1.0/24 --availability-zone us-east-1a --query 'Subnet.SubnetId' --output text)
+          SUBNET_ID_2=$(aws ec2 create-subnet --vpc-id ${{ env.VPC_ID }} --cidr-block 10.0.2.0/24 --availability-zone us-east-1b --query 'Subnet.SubnetId' --output text)
+          echo "SUBNET_ID_1=${SUBNET_ID_1}" >> $GITHUB_ENV
+          echo "SUBNET_ID_2=${SUBNET_ID_2}" >> $GITHUB_ENV
+        env:
+          AWS_DEFAULT_REGION: us-east-1
+
+      - name: Create Security Group
+        id: security-group
+        run: |
+          SECURITY_GROUP_ID=$(aws ec2 create-security-group --group-name my-sec-group --description "My security group" --vpc-id ${{ env.VPC_ID }} --query 'GroupId' --output text)
+          aws ec2 authorize-security-group-ingress --group-id $SECURITY_GROUP_ID --protocol tcp --port 27017 --cidr 0.0.0.0/0
+          echo "SECURITY_GROUP_ID=${SECURITY_GROUP_ID}" >> $GITHUB_ENV
+        env:
+          AWS_DEFAULT_REGION: us-east-1
+
+      - name: Create DocumentDB Subnet Group
+        run: |
+          aws docdb create-db-subnet-group \
+            --db-subnet-group-name my-subnet-group \
+            --db-subnet-group-description "My DocumentDB subnet group" \
+            --subnet-ids ${{ env.SUBNET_ID_1 }} ${{ env.SUBNET_ID_2 }}
+        env:
+          AWS_DEFAULT_REGION: us-east-1
+
+      - name: Create DocumentDB Cluster
+        run: |
+          aws docdb create-db-cluster \
+            --db-cluster-identifier my-docdb-cluster \
+            --engine docdb \
+            --master-username myusername \
+            --master-user-password mypassword \
+            --vpc-security-group-ids ${{ env.SECURITY_GROUP_ID }} \
+            --db-subnet-group-name my-subnet-group
+        env:
+          AWS_DEFAULT_REGION: us-east-1
+
+      - name: Create DocumentDB Instance
+        run: |
+          aws docdb create-db-instance \
+            --db-cluster-identifier my-docdb-cluster \
+            --db-instance-identifier my-docdb-instance \
+            --db-instance-class db.r5.large \
+            --engine docdb
+        env:
+          AWS_DEFAULT_REGION: us-east-1
+
+      - name: Get DocumentDB Cluster Endpoint
+        id: endpoint
+        run: |
+          endpoint=$(aws docdb describe-db-clusters --db-cluster-identifier my-docdb-cluster --query 'DBClusters[0].Endpoint' --output text)
+          echo "DB_ENDPOINT=${endpoint}" >> $GITHUB_ENV
+        env:
+          AWS_DEFAULT_REGION: us-east-1
+
+      - name: Output Cluster Endpoint
+        run: echo "DocumentDB Cluster Endpoint - ${{ env.DB_ENDPOINT }}"
